@@ -18,6 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Slot
 
 from crate.audio import AudioDecodeError, decode
+from crate.audio.decoder import HEAD_SECONDS
 from crate.config import Settings
 from crate.library.scanner import LibraryScanner
 from crate.persistence.database import open_database
@@ -31,22 +32,45 @@ class DecodeWorker(QObject):
     row; by the time a slow one finishes its result is stale, and the main
     window drops any result whose token is not the current one. Cheaper and
     far simpler than trying to cancel a decode in flight.
+
+    Long files are decoded in two stages -- a short head so playback can start
+    at once, then the whole file. See `HEAD_SECONDS`.
     """
 
-    decoded = Signal(int, object)
+    decoded = Signal(int, object, bool)
+    """``(token, DecodedAudio, is_final)``."""
+
     failed = Signal(int, str)
 
     @Slot(int, str)
     def decode_file(self, token: int, path: str) -> None:
+        target = Path(path)
         try:
-            audio = decode(Path(path))
+            head = decode(target, max_seconds=HEAD_SECONDS)
         except AudioDecodeError as exc:
             self.failed.emit(token, exc.message)
             return
         except Exception as exc:  # a decoder crash must not kill the thread
             self.failed.emit(token, f"{type(exc).__name__}: {exc}")
             return
-        self.decoded.emit(token, audio)
+
+        if not head.truncated:
+            # Short file: the head *is* the whole thing. Most of a sample
+            # library lands here, and it costs one decode, not two.
+            self.decoded.emit(token, head, True)
+            return
+
+        self.decoded.emit(token, head, False)
+
+        try:
+            full = decode(target)
+        except Exception as exc:
+            # The head is already playing, so this is not fatal: the user keeps
+            # the preview and simply does not get the tail.
+            message = exc.message if isinstance(exc, AudioDecodeError) else str(exc)
+            self.failed.emit(token, message)
+            return
+        self.decoded.emit(token, full, True)
 
 
 class ScanWorker(QObject):

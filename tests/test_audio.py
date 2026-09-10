@@ -282,3 +282,77 @@ def test_callback_is_safe_before_anything_is_played() -> None:
     player = SilentPlayer()
     assert np.all(pull(player, 32) == 0.0)
     assert player.position().total_frames == 0
+
+
+# ------------------------------------------------- head-then-full extension
+
+
+def test_extend_swaps_in_a_longer_buffer_without_losing_position() -> None:
+    """Auditioning starts on a 3-second head so time-to-sound does not scale
+    with file length; the full decode has to land without a gap."""
+    player = SilentPlayer()
+    head = make_audio(frames=100)
+    player.play(head)
+    pull(player, 60)
+
+    full = DecodedAudio(
+        path=Path("test.wav"),
+        samples=np.concatenate([head.samples, np.full((900, 2), 0.25, dtype=np.float32)]),
+        sample_rate=RATE,
+        source_channels=2,
+        source_frames=1000,
+    )
+    assert player.extend(full) is True
+
+    # Same frame, still playing, and the audio past the head is now reachable.
+    assert player.position().frame == 60
+    assert player.position().total_frames == 1000
+    assert player.state is PlaybackState.PLAYING
+    assert np.all(pull(player, 40) == 0.5)
+    assert np.all(pull(player, 10) == 0.25)
+
+
+def test_extend_refuses_a_different_sample_rate() -> None:
+    player = SilentPlayer()
+    player.play(make_audio(frames=100, rate=44100))
+    assert player.extend(make_audio(frames=500, rate=48000)) is False
+    assert player.position().total_frames == 100
+
+
+def test_extend_refuses_a_shorter_buffer() -> None:
+    player = SilentPlayer()
+    player.play(make_audio(frames=500))
+    assert player.extend(make_audio(frames=100)) is False
+    assert player.position().total_frames == 500
+
+
+def test_extend_does_nothing_when_nothing_is_loaded() -> None:
+    assert SilentPlayer().extend(make_audio()) is False
+
+
+def test_preview_seconds_is_stable_across_decode_stages(tmp_path: Path) -> None:
+    path = write_tone(tmp_path / "loop.wav", seconds=6.0)
+    head = decode(path, max_seconds=3.0)
+    full = decode(path)
+
+    assert head.truncated is True
+    assert head.decoded_seconds == pytest.approx(3.0, abs=0.01)
+    # The transport must not read 0:03 and then jump to 0:06.
+    assert head.preview_seconds == pytest.approx(full.preview_seconds, abs=0.01)
+    assert head.preview_seconds == pytest.approx(6.0, abs=0.01)
+
+
+def test_position_is_reported_before_any_stream_is_opened() -> None:
+    """With auditioning off, nothing opens a device -- but the transport still
+    has to show an honest elapsed time."""
+
+    class NeverOpens(AudioPlayer):
+        def _ensure_stream(self, sample_rate: int) -> None:
+            return None
+
+    player = NeverOpens()
+    player.play(make_audio(frames=RATE * 2))
+    position = player.position()
+
+    assert position.sample_rate == RATE
+    assert position.total_seconds == pytest.approx(2.0)

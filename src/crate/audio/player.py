@@ -80,6 +80,14 @@ class AudioPlayer:
         self._blocksize = blocksize
 
         self._buffer: np.ndarray | None = None
+        self._buffer_rate = 0
+        """Sample rate of the loaded audio.
+
+        Deliberately separate from `_stream_rate`, which describes the output
+        device. The two are usually equal, but the buffer exists before any
+        stream is opened -- with auditioning switched off, nothing opens one
+        at all -- and the transport still has to report an honest position."""
+
         self._position = 0
         self._state = PlaybackState.STOPPED
         self._finished_callback: Callable[[], None] | None = None
@@ -90,9 +98,33 @@ class AudioPlayer:
         """Start playing ``audio``, replacing whatever was playing."""
         with self._lock:
             self._buffer = audio.samples
+            self._buffer_rate = audio.sample_rate
             self._position = max(0, min(start_frame, audio.frames))
             self._state = PlaybackState.PLAYING
         self._ensure_stream(audio.sample_rate)
+
+    def extend(self, audio: DecodedAudio) -> bool:
+        """Swap in a longer decode of what is already playing, seamlessly.
+
+        Auditioning starts from a short head decode so that time-to-sound does
+        not scale with file length (a 34 MB acapella takes ~550 ms to decode in
+        full but ~1 ms for its first few seconds). The full decode arrives a
+        moment later and replaces the buffer here.
+
+        Safe because the head is a strict prefix of the full decode: the frame
+        the callback is sitting on means the same thing in both, so playback
+        continues without a gap or a jump.
+
+        Returns False, changing nothing, if the buffers are not compatible —
+        a different rate or a shorter buffer means this is not the same audio.
+        """
+        with self._lock:
+            if self._buffer is None or self._buffer_rate != audio.sample_rate:
+                return False
+            if audio.frames <= self._buffer.shape[0]:
+                return False
+            self._buffer = audio.samples
+            return True
 
     def toggle(self) -> PlaybackState:
         """Pause if playing, resume if paused. Returns the resulting state."""
@@ -145,7 +177,7 @@ class AudioPlayer:
                 state=self._state,
                 frame=self._position,
                 total_frames=total,
-                sample_rate=self._stream_rate or 0,
+                sample_rate=self._buffer_rate,
             )
 
     @property
@@ -159,6 +191,7 @@ class AudioPlayer:
         with self._lock:
             self._state = PlaybackState.STOPPED
             self._buffer = None
+            self._buffer_rate = 0
             self._position = 0
 
     def _close_stream(self) -> None:

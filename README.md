@@ -23,9 +23,13 @@ crate scan "D:/Samples"
 crate ui
 ```
 
+On Windows, `Crate.bat` in the repo root launches the browser with no console
+window — double-click it or pin it to the taskbar.
+
 - **Search** filenames *and folder names* — `dark kick` matches both.
-- **Instant audition.** Click or arrow onto a sample and it plays immediately
-  (median 11.5 ms to decode on a 35k library).
+- **Instant audition.** Click or arrow onto a sample and it plays immediately.
+  Playback starts from a 3-second head decode, so time-to-sound is ~1.5 ms
+  whether the file is a 40 KB hi-hat or a 34 MB acapella.
 - **Waveform** with click-and-drag scrubbing.
 - **Favourites**, which survive rescans and folder reorganisation.
 - **Drag straight into your DAW.**

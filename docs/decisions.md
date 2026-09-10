@@ -225,6 +225,67 @@ Nothing else creates such names.
 
 ---
 
+## D15 — Audition decodes the head first
+
+**Decision.** Selecting a sample decodes its first 3 seconds, starts playback,
+then decodes the whole file and swaps the longer buffer in underneath the
+audio callback.
+
+**Why.** Reported as "a delay when the list crosses into a new folder".
+Measuring said otherwise — first-file-in-a-folder was *faster* than
+same-folder (7.4 ms vs 9.4 ms median). The real variable is **file size**, and
+size clusters by folder: arrowing out of a one-shot folder into a folder of
+loops and acapellas is what you feel.
+
+| | full decode | 3-second head |
+| --- | --- | --- |
+| < 200 KB | 7 ms | 0.6 ms |
+| 1–5 MB | 16 ms (max 123) | 1.1 ms |
+| 5–20 MB | 77 ms (max 255) | 1.3 ms |
+| > 20 MB | 111 ms (max 549) | 1.0 ms |
+
+Head decode is flat regardless of size. Measured end to end on the 40 largest
+files in the library: worst-case time-to-sound **388 ms → 1.5 ms**.
+
+**Why it is safe.** The head is a strict prefix of the full decode, so the
+frame the callback is sitting on means the same thing in both buffers.
+`AudioPlayer.extend` swaps them under the lock; playback does not gap or jump.
+
+**Cost.** Long files are decoded twice (the second time in the background,
+after sound is already out). Files short enough to fit in the head are decoded
+once — that is most of a sample library. The waveform holds a "Loading
+waveform…" state for the few hundred milliseconds before the full decode
+lands, rather than drawing 3 seconds of a 60-second file stretched across the
+whole width.
+
+---
+
+## D16 — Drag-and-drop lives on the model, not the view
+
+**Decision.** `flags()`, `mimeTypes()` and `mimeData()` are implemented on
+`SampleTableModel`.
+
+**Why.** They were on a `QTableView` subclass, and dragging into a DAW simply
+did nothing. Two reasons, both invisible:
+
+1. `QTableView` **has no `mimeData` method**. `QAbstractItemView::startDrag`
+   calls `model->mimeData()`. An override on the view is never called by
+   anything.
+2. `QAbstractTableModel.flags()` does not include `ItemIsDragEnabled`, and
+   `startDrag` filters the selection by that flag — so there was nothing to
+   drag in the first place and `startDrag` returned immediately.
+
+**The testing lesson.** There *was* a passing test. It called
+`view.mimeData([index])` directly and asserted the payload — a method Qt never
+invokes. A test that exercises a path the framework does not use is worse than
+no test, because it reports confidence. The replacement asserts the flag and
+goes through the model, the way `startDrag` does.
+
+`text/plain` carries native `C:\...` separators rather than the `file:///C:/`
+URL form, since a host reading text wants a path it can open.
+
+---
+
 ## Known debt
 
 | Item | Impact | Trigger to address |
@@ -237,4 +298,5 @@ Nothing else creates such names.
 | No CI pipeline | Nothing enforces the suite | Before Phase 3 |
 | Scan is single-threaded | First scan of a huge drive is I/O bound | Measure before optimising |
 | No structured logging | Debugging a scan means reading `scan_errors` | Phase 3, with background jobs |
-| Drag-out to DAW is untested automatically | Only the MIME payload is covered; the drop side is manual | If a host rejects the payload |
+| Drag-out: the *drop* side is manual | The flag and the model payload are covered; whether a given host accepts CF_HDROP is not something a headless test can assert | If a host rejects the payload |
+| Long files decode twice | Second decode is in the background, after sound is already out | If background decoding ever competes with the next audition |

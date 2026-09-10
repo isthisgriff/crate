@@ -66,6 +66,13 @@ duration or any other property requiring the file to be opened.
 - [x] Tests for the model, the audio engine and the window (headless)
 - [x] **Used against the real library** — 35,089 samples
 
+Fixed after first real use:
+
+- Audition latency scaled with file size (up to 388 ms on big loops); now a
+  head-first decode makes time-to-sound flat at ~1.5 ms (D15).
+- Drag into a DAW did nothing — drag support was on the view, where Qt never
+  looks (D16).
+
 Also this phase, because the real library demanded it: macOS AppleDouble
 sidecars are skipped (756 files, 2.1% of the library — D14) and `crate prune`
 clears records for files that are genuinely gone.

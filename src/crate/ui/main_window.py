@@ -54,7 +54,6 @@ from crate.app import CrateApp
 from crate.audio import AudioPlaybackError, AudioPlayer, DecodedAudio, PlaybackState
 from crate.domain import Sample, ScanProgress, ScanReport
 from crate.ui.models import SORT_BY_COLUMN, Column, SampleTableModel
-from crate.ui.table import SampleTableView
 from crate.ui.waveform_view import WaveformView
 from crate.ui.workers import DecodeWorker, ScanWorker
 
@@ -76,6 +75,7 @@ class MainWindow(QMainWindow):
         self._app = app
         self._player = AudioPlayer()
         self._audio: DecodedAudio | None = None
+        self._audio_is_final = False
         self._decode_token = 0
         self._autoplay = True
 
@@ -138,8 +138,13 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_table(self) -> QTableView:
-        self._table = SampleTableView()
+        self._table = QTableView()
         self._table.setModel(self._model)
+        # Drag support proper lives on the model (flags + mimeData); the view
+        # only has to be willing to start one.
+        self._table.setDragEnabled(True)
+        self._table.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self._table.setDefaultDropAction(Qt.DropAction.CopyAction)
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self._table.setAlternatingRowColors(True)
@@ -317,15 +322,39 @@ class MainWindow(QMainWindow):
             return
         self._detail_label.setText(str(sample.path))
         self._decode_token += 1
+        self._audio = None
+        self._audio_is_final = False
         self._waveform.set_audio(None, "Loading…")
         self.decode_requested.emit(self._decode_token, str(sample.path))
 
-    def _on_decoded(self, token: int, audio: DecodedAudio) -> None:
+    def _on_decoded(self, token: int, audio: DecodedAudio, is_final: bool) -> None:
+        """Handle one stage of a decode.
+
+        Long files arrive twice: a short head so playback can begin at once,
+        then the whole file. See `HEAD_SECONDS`.
+        """
         if token != self._decode_token:
             return  # superseded while the user kept moving
+
+        already_playing_head = self._audio is not None and not self._audio_is_final
         self._audio = audio
-        self._waveform.set_audio(audio)
+        self._audio_is_final = is_final
         self._detail_label.setText(self._describe(audio))
+
+        if not is_final:
+            # Do not draw a 3-second envelope stretched across a 60-second
+            # file; that would be a lie the playhead then races across.
+            self._waveform.set_audio(None, "Loading waveform…")
+            if self._autoplay:
+                self._start_playback()
+            return
+
+        self._waveform.set_audio(audio)
+        if already_playing_head:
+            # Swap the longer buffer in underneath the callback. If it refuses
+            # (the user stopped, or moved on) there is nothing to restart.
+            self._player.extend(audio)
+            return
         if self._autoplay:
             self._start_playback()
 
@@ -391,8 +420,10 @@ class MainWindow(QMainWindow):
         # "audition on select" off, a loaded sample would otherwise read
         # 0:00 / 0:00 until you pressed play.
         total = position.total_seconds
-        if total <= 0.0 and self._audio is not None:
-            total = self._audio.decoded_seconds
+        if self._audio is not None:
+            # The file's real playable length, not the length of whichever
+            # decode stage happens to be loaded.
+            total = self._audio.preview_seconds
 
         self._time_label.setText(f"{_clock(position.seconds)} / {_clock(total)}")
         self._update_play_button()

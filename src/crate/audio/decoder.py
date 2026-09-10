@@ -26,6 +26,15 @@ DEFAULT_MAX_SECONDS = 300.0
 """Preview decode cap. Long enough for any loop or one-shot, short enough that
 a stray podcast episode costs ~100 MB rather than gigabytes."""
 
+HEAD_SECONDS = 3.0
+"""How much to decode before starting playback.
+
+Measured on a 35k-sample library: a full decode costs 7 ms for a one-shot but
+550 ms for a 20 MB+ file, while decoding the first three seconds is flat at
+~1 ms whatever the size. Auditioning the head first makes time-to-sound
+constant, which is the difference between arrowing through loops feeling
+broken and feeling like a sampler."""
+
 
 class AudioDecodeError(Exception):
     """A file could not be decoded. Carries the path and the underlying cause."""
@@ -65,6 +74,15 @@ class DecodedAudio:
     @property
     def decoded_seconds(self) -> float:
         return self.frames / self.sample_rate if self.sample_rate else 0.0
+
+    @property
+    def preview_seconds(self) -> float:
+        """How much of this file the browser can ever play.
+
+        Stable across the head/full decode swap, so the transport does not
+        show 0:03 for a moment and then jump to 1:04.
+        """
+        return min(self.duration_seconds, DEFAULT_MAX_SECONDS)
 
 
 def decode(path: Path | str, *, max_seconds: float | None = DEFAULT_MAX_SECONDS) -> DecodedAudio:

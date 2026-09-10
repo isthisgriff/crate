@@ -19,11 +19,13 @@ pytest.importorskip("PySide6")
 
 from collections.abc import Iterator
 
+import numpy as np
 from PySide6.QtCore import QModelIndex, Qt
 from PySide6.QtWidgets import QApplication
 from pytestqt.qtbot import QtBot
 
 from crate.app import CrateApp
+from crate.audio import DecodedAudio, PlaybackState
 from crate.domain import SampleQuery, SampleSort
 from crate.library.scanner import LibraryScanner
 from crate.persistence.sample_repository import SampleRepository
@@ -237,10 +239,6 @@ def test_selecting_a_row_requests_a_decode(window: MainWindow, qtbot: QtBot) -> 
 
 
 def test_stale_decode_results_are_ignored(window: MainWindow) -> None:
-    import numpy as np
-
-    from crate.audio import DecodedAudio
-
     audio = DecodedAudio(
         path=Path("stale.wav"),
         samples=np.zeros((10, 2), dtype=np.float32),
@@ -248,7 +246,7 @@ def test_stale_decode_results_are_ignored(window: MainWindow) -> None:
         source_channels=2,
         source_frames=10,
     )
-    window._on_decoded(window._decode_token - 5, audio)
+    window._on_decoded(window._decode_token - 5, audio, True)
     assert window._audio is None
 
 
@@ -273,15 +271,36 @@ def test_undecodable_file_shows_a_message_and_does_not_crash(window: MainWindow)
     assert window._audio is None
 
 
-def test_dragging_a_row_produces_a_file_url(window: MainWindow) -> None:
+def test_rows_are_draggable(window: MainWindow) -> None:
+    """Without ItemIsDragEnabled on the model, Qt never starts a drag at all.
+
+    This is the flag whose absence made drag-into-DAW silently do nothing.
+    """
     index = window._model.index(0, 0)
-    data = window._table.mimeData([index])
+    assert window._model.flags(index) & Qt.ItemFlag.ItemIsDragEnabled
+    assert window._table.dragEnabled()
+
+
+def test_drag_payload_comes_from_the_model(window: MainWindow) -> None:
+    """Qt asks the *model* for MIME data, never the view.
+
+    An earlier version put `mimeData` on the QTableView subclass, where Qt
+    never calls it -- and the test passed because it called that method
+    directly. Go through the model, the way `startDrag` does.
+    """
+    model = window._model
+    assert "text/uri-list" in model.mimeTypes()
+
+    # A row selection hands Qt one index per column; they must collapse to one file.
+    indexes = [model.index(0, column) for column in range(model.columnCount())]
+    data = model.mimeData(indexes)
 
     assert data is not None
     urls = data.urls()
     assert len(urls) == 1
     assert urls[0].isLocalFile()
     assert Path(urls[0].toLocalFile()).exists()
+    assert data.text() == str(model.sample_at(0).path)  # type: ignore[union-attr]
 
 
 def test_header_click_sorts_and_toggles_direction(window: MainWindow) -> None:
@@ -315,10 +334,6 @@ def test_clicking_an_unsortable_column_is_ignored(window: MainWindow) -> None:
 
 
 def test_duration_is_shown_before_playback_starts(window: MainWindow) -> None:
-    import numpy as np
-
-    from crate.audio import DecodedAudio
-
     window._autoplay = False
     window._on_decoded(
         window._decode_token,
@@ -329,6 +344,7 @@ def test_duration_is_shown_before_playback_starts(window: MainWindow) -> None:
             source_channels=2,
             source_frames=44100 * 3,
         ),
+        True,
     )
     window._tick_transport()
     assert window._time_label.text() == "0:00 / 0:03"
@@ -342,3 +358,95 @@ def test_closing_mid_scan_cancels_rather_than_blocking(window: MainWindow) -> No
     assert window._scanner._cancel.is_set()
     assert window._scan_thread.isFinished()
     assert window._decode_thread.isFinished()
+
+
+# ------------------------------------------------------ two-stage decoding
+
+
+def test_short_file_decodes_in_one_stage(qapp: QApplication, tmp_path: Path) -> None:
+    """Most of a sample library is one-shots. They must not pay for two decodes."""
+    import soundfile as sf
+
+    from crate.ui.workers import DecodeWorker
+
+    path = tmp_path / "kick.wav"
+    sf.write(str(path), np.zeros((4410, 2), dtype=np.float32), 44100)
+
+    worker = DecodeWorker()
+    results: list[tuple[DecodedAudio, bool]] = []
+    worker.decoded.connect(lambda _t, audio, final: results.append((audio, final)))
+    worker.decode_file(1, str(path))
+
+    assert len(results) == 1
+    assert results[0][1] is True
+
+
+def test_long_file_emits_a_head_then_the_whole_thing(qapp: QApplication, tmp_path: Path) -> None:
+    """The fix for audition latency: sound starts from a short head, so
+    time-to-sound stops scaling with file size."""
+    import soundfile as sf
+
+    from crate.audio.decoder import HEAD_SECONDS
+    from crate.ui.workers import DecodeWorker
+
+    path = tmp_path / "loop.wav"
+    seconds = HEAD_SECONDS * 3
+    sf.write(str(path), np.zeros((int(44100 * seconds), 2), dtype=np.float32), 44100)
+
+    worker = DecodeWorker()
+    results: list[tuple[DecodedAudio, bool]] = []
+    worker.decoded.connect(lambda _t, audio, final: results.append((audio, final)))
+    worker.decode_file(7, str(path))
+
+    assert [is_final for _, is_final in results] == [False, True]
+    head, full = results[0][0], results[1][0]
+    assert head.decoded_seconds == pytest.approx(HEAD_SECONDS, abs=0.05)
+    assert full.decoded_seconds == pytest.approx(seconds, abs=0.05)
+    # The head is a strict prefix, which is what makes the swap seamless.
+    assert np.array_equal(head.samples, full.samples[: head.frames])
+
+
+def test_window_plays_the_head_then_extends(window: MainWindow) -> None:
+    def clip(frames: int, total: int) -> DecodedAudio:
+        return DecodedAudio(
+            path=Path("loop.wav"),
+            samples=np.zeros((frames, 2), dtype=np.float32),
+            sample_rate=44100,
+            source_channels=2,
+            source_frames=total,
+            truncated=frames < total,
+        )
+
+    token = window._decode_token
+    window._on_decoded(token, clip(44100 * 3, 44100 * 30), False)
+
+    # Playing already, but the waveform waits rather than drawing 3s of a 30s file.
+    assert window._player.state is PlaybackState.PLAYING
+    assert window._player.position().total_frames == 44100 * 3
+    assert window._waveform._peaks is None
+
+    window._on_decoded(token, clip(44100 * 30, 44100 * 30), True)
+
+    assert window._player.position().total_frames == 44100 * 30
+    assert window._player.state is PlaybackState.PLAYING
+    assert window._waveform._peaks is not None
+
+
+def test_transport_shows_the_whole_file_while_only_the_head_is_loaded(
+    window: MainWindow,
+) -> None:
+    window._on_decoded(
+        window._decode_token,
+        DecodedAudio(
+            path=Path("loop.wav"),
+            samples=np.zeros((44100 * 3, 2), dtype=np.float32),
+            sample_rate=44100,
+            source_channels=2,
+            source_frames=44100 * 30,
+            truncated=True,
+        ),
+        False,
+    )
+    window._tick_transport()
+    # 0:30, not 0:03 — the label must not jump when the full decode lands.
+    assert window._time_label.text().endswith("/ 0:30")

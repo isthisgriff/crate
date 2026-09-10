@@ -9,16 +9,19 @@ sorting are pushed into SQL, and the model pages results in through
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import datetime
 from typing import Any
 
 from PySide6.QtCore import (
     QAbstractTableModel,
+    QMimeData,
     QModelIndex,
     QObject,
     QPersistentModelIndex,
     Qt,
+    QUrl,
 )
 
 from crate.domain import Sample, SampleQuery, SampleSort
@@ -199,6 +202,52 @@ class SampleTableModel(QAbstractTableModel):
         ):
             return int(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         return None
+
+    # ------------------------------------------------------------ dragging
+
+    # Dragging a row into a DAW is what makes Crate a replacement for the
+    # file browser rather than something you consult before opening it.
+    #
+    # All three pieces below live on the *model*, not the view, because that
+    # is where Qt looks: `QAbstractItemView::startDrag` filters the selection
+    # by `ItemIsDragEnabled` and then calls `model->mimeData()`. `QTableView`
+    # has no `mimeData` of its own -- an override there is silently never
+    # called, which is exactly the bug this replaced.
+
+    def flags(self, index: Index) -> Qt.ItemFlag:
+        base = super().flags(index)
+        if not index.isValid():
+            return base
+        return base | Qt.ItemFlag.ItemIsDragEnabled
+
+    def mimeTypes(self) -> list[str]:
+        return ["text/uri-list", "text/plain"]
+
+    def mimeData(self, indexes: Sequence[Index]) -> QMimeData:
+        """Hand the drop target real files.
+
+        Windows turns a `text/uri-list` of local files into CF_HDROP, which is
+        what a DAW is listening for. `text/plain` is the fallback for hosts
+        that only read text.
+        """
+        paths: list[str] = []
+        seen: set[int] = set()
+        for index in indexes:
+            row = index.row()
+            if row in seen:
+                continue
+            seen.add(row)
+            sample = self.sample_at(row)
+            if sample is not None:
+                paths.append(str(sample.path))
+
+        data = QMimeData()
+        if paths:
+            data.setUrls([QUrl.fromLocalFile(path) for path in paths])
+            # Native separators here, not the URL form: a host that reads
+            # text/plain wants a path it can open, not file:///C:/...
+            data.setText("\n".join(paths))
+        return data
 
     @staticmethod
     def _display(sample: Sample, column: int) -> str:
