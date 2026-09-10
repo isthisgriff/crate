@@ -25,6 +25,15 @@ from pathlib import Path
 
 from crate.library.formats import is_supported_audio, normalized_extension
 
+APPLEDOUBLE_PREFIX = "._"
+"""macOS resource-fork sidecars.
+
+Unzipping a Mac-authored sample pack on Windows scatters these everywhere: a
+200-byte `._Kick.wav` beside every real `Kick.wav`. They carry the right
+extension and are not audio. On this machine they were 2.1% of the library --
+enough to be a nuisance in every search result and every "find similar" list
+later on."""
+
 
 @dataclass(frozen=True, slots=True)
 class DiscoveredFile:
@@ -126,6 +135,9 @@ def walk_audio_files(
                     continue
 
                 if not entry.is_file(follow_symlinks=follow_symlinks):
+                    continue
+
+                if entry.name.startswith(APPLEDOUBLE_PREFIX):
                     continue
 
                 if not is_supported_audio(entry.path, supported_extensions):

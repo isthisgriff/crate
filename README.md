@@ -9,26 +9,46 @@ built so that eventually it can.
 
 Everything stays on your machine: local database, local files, local analysis.
 
-**Status: Phase 1 — sample library inventory.** No UI, no audio analysis, no AI
+**Status: Phase 2 — a working sample browser.** No audio analysis and no AI
 yet. See [docs/roadmap.md](docs/roadmap.md).
+
+![The Crate browser](docs/screenshot.png)
 
 ## What works today
 
-Point Crate at a folder and it builds a persistent, incrementally-maintained
-inventory of every supported audio file underneath it.
+Point Crate at your sample folders, then browse and audition them.
 
 ```bash
 crate scan "D:/Samples"
-crate stats
-crate roots
+crate ui
 ```
 
-Formats indexed in Phase 1: `.wav`, `.wave`, `.mp3`, `.flac`, `.aif`, `.aiff`,
-`.aifc`.
+- **Search** filenames *and folder names* — `dark kick` matches both.
+- **Instant audition.** Click or arrow onto a sample and it plays immediately
+  (median 11.5 ms to decode on a 35k library).
+- **Waveform** with click-and-drag scrubbing.
+- **Favourites**, which survive rescans and folder reorganisation.
+- **Drag straight into your DAW.**
+- **Filter** by format or favourites; **sort** by name, folder, size or date.
+- **Scan from the window**, on a worker thread, with progress and cancel.
+
+Formats: `.wav`, `.wave`, `.mp3`, `.flac`, `.aif`, `.aiff`, `.aifc`.
+
+### Keyboard
+
+| Key | Does |
+| --- | --- |
+| `↑` `↓` | Move through results, auditioning as you go |
+| `Space` | Play / pause |
+| `Esc` | Stop |
+| `F` | Toggle favourite |
+| `Ctrl+F` or `/` | Jump to the search box |
+| `Ctrl+R` | Rescan every known folder |
+| Double-click | Replay from the start |
 
 ## Setup
 
-Requires Python 3.11+. [`uv`](https://docs.astral.sh/uv/) is recommended but
+Requires Python 3.12+ (numpy 2.5 sets the floor). [`uv`](https://docs.astral.sh/uv/) is recommended but
 optional.
 
 ```bash
@@ -44,15 +64,23 @@ python -m venv .venv && .venv/Scripts/activate   # source .venv/bin/activate on 
 pip install -e ".[dev]"
 ```
 
-Phase 1 has **zero runtime dependencies** — only the standard library. The dev
-extra installs pytest, ruff and mypy.
+Core dependencies are numpy, soundfile and sounddevice. The desktop window is
+the `ui` extra (PySide6), so `crate scan` works on a headless box without a
+GUI toolkit installed:
+
+```bash
+pip install -e .          # scanning and the CLI
+pip install -e ".[ui]"    # plus the browser
+```
 
 ## Usage
 
 ```bash
+crate ui                     # open the browser
 crate scan PATH [PATH ...]   # index directories (safe to re-run)
 crate stats                  # summary of the indexed library
 crate roots                  # directories Crate knows about
+crate prune [--yes]          # forget records for files that are gone
 crate --help
 ```
 
@@ -92,6 +120,7 @@ Scanned D:\Samples
   new             12
   changed         3
   unchanged       41,193
+  moved           0
   now missing     0
   errors          1
 ```
@@ -99,6 +128,10 @@ Scanned D:\Samples
 Files that disappear are marked `missing`, never deleted — an unplugged
 external drive must not wipe your library. Files under a directory that could
 not be read are left alone entirely, because "unreadable" is not "deleted".
+Use `crate prune --yes` when you actually want those records gone.
+
+Renaming or moving a folder is recognised as a **move**, not as a deletion
+plus an addition, so your favourites follow the files.
 
 ## Verifying it on a real library
 
@@ -111,15 +144,24 @@ crate scan "D:/Music" "C:/Users/griff/Documents/Image-Line"
 
 | | |
 | --- | --- |
-| Samples indexed | 35,845 |
+| Samples indexed | 35,089 |
 | Total audio | 53.5 GB |
 | Errors | 0 |
-| Database size | 20.9 MB |
-| Rescan of 35,217 files | 1.1 s (~32,000 files/s) |
-| Rescan result | 0 new, 0 changed, 35,217 unchanged |
+| Database size | 21 MB |
+| Rescan of 34,461 files | 1.7 s (~21,000 files/s) |
+| Rescan result | 0 new, 0 changed, 34,461 unchanged |
+| Search, one keystroke | ~40 ms (debounced at 140 ms) |
+| Audition (decode) | median 11.5 ms, p95 128 ms |
+| Decode failures, 300 random samples | 0 |
 
-The rescan number is the one that matters: re-running the scan reuses every
-existing record instead of rebuilding the inventory.
+The rescan number is the one that matters for indexing: re-running the scan
+reuses every existing record instead of rebuilding the inventory. The decode
+number is the one that matters for the browser — it is what makes arrowing
+down a list of kicks feel like a sampler rather than a file manager.
+
+Along the way this turned up 756 macOS AppleDouble sidecar files (`._Kick.wav`,
+~200 bytes each) unpacked from Mac-authored sample packs. They are now skipped
+at scan time.
 
 ## Development
 

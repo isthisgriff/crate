@@ -51,3 +51,33 @@ def test_database_is_created_under_the_data_dir(tmp_path: Path, library: Path) -
     data_dir = tmp_path / "data"
     main(["--data-dir", str(data_dir), "scan", str(library), "--quiet"])
     assert (data_dir / "crate.db").is_file()
+
+
+def test_prune_reports_before_deleting(
+    tmp_path: Path, library: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data_dir = tmp_path / "data"
+    main(["--data-dir", str(data_dir), "scan", str(library), "--quiet"])
+    (library / "vocals" / "Audio_338.mp3").unlink()
+    main(["--data-dir", str(data_dir), "scan", str(library), "--quiet"])
+    capsys.readouterr()
+
+    # Without --yes it is a report, not a deletion.
+    assert main(["--data-dir", str(data_dir), "prune"]) == 0
+    assert "1 sample(s) are marked missing" in capsys.readouterr().out
+
+    assert main(["--data-dir", str(data_dir), "prune", "--yes"]) == 0
+    assert "Removed 1 record(s)" in capsys.readouterr().out
+
+    assert main(["--data-dir", str(data_dir), "prune"]) == 0
+    assert "Nothing to prune" in capsys.readouterr().out
+
+
+def test_prune_with_nothing_missing(
+    tmp_path: Path, library: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    data_dir = tmp_path / "data"
+    main(["--data-dir", str(data_dir), "scan", str(library), "--quiet"])
+    capsys.readouterr()
+    assert main(["--data-dir", str(data_dir), "prune", "--yes"]) == 0
+    assert "Nothing to prune" in capsys.readouterr().out

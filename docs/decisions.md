@@ -67,7 +67,7 @@ deleted stays stale until a successful scan. Correct direction to be wrong in.
 
 ---
 
-## D5 — No move detection yet
+## D5 — No move detection *(resolved in Phase 2)*
 
 **Decision.** Renaming a folder shows up as N missing files plus N new files.
 
@@ -78,8 +78,8 @@ actually at stake yet.
 
 **Cost.** Rescanning after a big reorganisation churns the inventory.
 
-**When to revisit.** Before Phase 2 ships favourites. The
-`(size_bytes, mtime_ns)` index needed for the lookup already exists.
+**Resolved.** Favourites made row identity valuable, so Phase 2 implemented
+it. See D10.
 
 ---
 
@@ -109,14 +109,15 @@ anything to render.
 
 ---
 
-## D8 — Zero runtime dependencies in Phase 1
+## D8 — Zero runtime dependencies in Phase 1 *(superseded in Phase 2)*
 
-**Decision.** Only the standard library. `sqlite3`, `os.scandir`, `tomllib`,
-`argparse`, `pathlib`.
+**Decision.** Phase 1 used only the standard library.
 
-**Why.** Nothing needed is missing from it, and the first thing this project
-does — walk a filesystem into SQLite — should not require a dependency
-resolver. Real dependencies arrive in Phase 3 with actual audio decoding.
+**Why.** Walking a filesystem into SQLite needs nothing else.
+
+**Superseded by D11.** Phase 2 adds numpy, soundfile and sounddevice as core
+dependencies, and PySide6 as the `ui` extra. `crate scan` still runs without
+Qt installed.
 
 ---
 
@@ -134,14 +135,106 @@ without `julianday()`. Neither matters at this scale.
 
 ---
 
+## D10 — Move detection as a post-walk pass
+
+**Decision.** After the walk, a file that vanished from one path and appeared
+at another with the same size, mtime and filename is treated as the same file:
+the original row is re-pointed and the newly inserted row discarded.
+
+**Why post-walk.** Mid-walk it is impossible to tell a move from a copy —
+the original path may simply not have been visited yet. The pass also has to
+run before missing-marking, or a rename would flag the file as deleted.
+
+**Why the old row survives, not the new one.** Row identity is what favourites
+(and later analysis and embeddings) hang off. Re-pointing the old row keeps
+`id`, `first_seen_at` and every derived artefact; merging onto the new row
+would not.
+
+**Cost.** Conservative on purpose. Same name and bytes but a touched
+timestamp reads as delete-plus-add. A pack with many identical copies pairs
+them arbitrarily, which is harmless since the rows are interchangeable.
+
+**Implementation note.** New rows are found with
+`first_seen_at >= scan_started_at` rather than by buffering every new path
+during the walk, so a first scan of 100k files costs no extra memory.
+
+---
+
+## D11 — soundfile + sounddevice, not Qt Multimedia
+
+**Decision.** Decode with libsndfile (`soundfile`) into numpy, play through
+PortAudio (`sounddevice`). Qt is used only for the interface.
+
+**Why.** The waveform needs decoded samples and so does playback. Decoding
+once and using the same buffer for both is what makes preview instant: on
+this library the median decode is 11.5 ms, and starting playback afterwards
+is a pointer assignment. `QMediaPlayer` would decode separately, internally,
+with its own start latency and no access to the samples.
+
+It also front-runs Phase 3: analysis will decode through exactly this path,
+so a file is never opened twice for two different reasons.
+
+**Cost.** Three dependencies instead of zero, and PortAudio is a native
+library. libsndfile 1.2 covers every format in the library (WAV, FLAC, MP3,
+AIFF), verified.
+
+---
+
+## D12 — Decoded audio is normalised to stereo float32, capped at 5 minutes
+
+**Decision.** Every decode returns `(frames, 2)` float32. Mono is duplicated,
+surround is folded down, anything past 5 minutes is truncated for preview.
+
+**Why stereo always.** The output stream can then stay open across auditions
+and only reopen when the sample *rate* changes. Reopening a PortAudio stream
+costs tens of milliseconds and is audible as hesitation between samples.
+
+**Why the cap.** A sample browser must not allocate 600 MB because there is a
+two-hour DJ set in the folder. `DecodedAudio.duration_seconds` still reports
+the real file length; `decoded_seconds` reports the excerpt.
+
+---
+
+## D13 — Filtering and sorting happen in SQL, not in a proxy model
+
+**Decision.** `SampleTableModel` pages results in via `canFetchMore`/
+`fetchMore`; `QSortFilterProxyModel` is not used, and `setSortingEnabled` is
+off with the header indicator driven by hand.
+
+**Why.** A proxy model filters and sorts rows it already holds, so it needs
+all of them. Showing 40 rows out of 35,000 has to cost 40 rows.
+
+**Cost.** Sorting logic lives in two places (the SQL and the header handler),
+and the header no longer manages its own indicator — which was in fact a bug
+until it was written explicitly.
+
+---
+
+## D14 — macOS AppleDouble sidecars are skipped
+
+**Decision.** Files named `._*` and the `__MACOSX` directory are never
+indexed.
+
+**Why.** Unzipping a Mac-authored sample pack on Windows scatters ~200-byte
+resource-fork files carrying a real `.wav` extension. They were **756 files,
+2.1% of this library**, and they cannot be decoded — so they were noise in
+every search result and would be noise in every similarity result later.
+
+**Cost.** A real file legitimately named `._something.wav` would be skipped.
+Nothing else creates such names.
+
+---
+
 ## Known debt
 
 | Item | Impact | Trigger to address |
 | --- | --- | --- |
-| No move detection (D5) | Reorganising churns the inventory | Before favourites ship |
+| Deep paging is O(offset) — **measured 174 ms at row 35,000** vs 20 ms at row 0 | Perceptible hitch when scrolling an *unfiltered* 35k list | Keyset pagination, if unfiltered deep scrolling turns out to be a real habit. Searching first makes it moot. |
+| Search is `LIKE %term%` — **measured 40 ms** on 35k rows | Fine behind the 140 ms debounce; grows linearly | FTS5, when a library makes 40 ms into 200 ms |
 | No content hash (D2) | Rare missed modifications; no dedupe | Phase 3 |
-| No `crate forget` / prune command | Missing rows accumulate | When it becomes annoying |
+| Waveform peaks recomputed on every resize | A 5-minute file recomputes ~13 M samples on drag | Cache per width, if dragging the window ever feels sticky |
 | Symlink and POSIX-permission tests skip on Windows | Reduced coverage on the primary dev machine | Add CI on Linux |
-| No CI pipeline | Nothing enforces the suite | Before Phase 2 |
+| No CI pipeline | Nothing enforces the suite | Before Phase 3 |
 | Scan is single-threaded | First scan of a huge drive is I/O bound | Measure before optimising |
 | No structured logging | Debugging a scan means reading `scan_errors` | Phase 3, with background jobs |
+| Drag-out to DAW is untested automatically | Only the MIME payload is covered; the drop side is manual | If a host rejects the payload |

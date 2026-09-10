@@ -18,7 +18,7 @@ from pathlib import Path
 
 from crate import __version__
 from crate.app import CrateApp
-from crate.domain import ScanProgress, ScanReport
+from crate.domain import SampleStatus, ScanProgress, ScanReport
 from crate.persistence.migrations import SCHEMA_VERSION
 
 
@@ -70,6 +70,7 @@ def _print_report(report: ScanReport) -> None:
     print(f"  new             {report.added:,}")
     print(f"  changed         {report.updated:,}")
     print(f"  unchanged       {report.unchanged:,}")
+    print(f"  moved           {report.moved:,}")
     print(f"  now missing     {report.marked_missing:,}")
     print(f"  errors          {report.errors:,}")
     print(f"  took            {report.duration_seconds:.2f}s ({rate:,.0f} files/s)")
@@ -130,6 +131,41 @@ def cmd_roots(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    """Delete records for files that are gone.
+
+    Separate from scanning on purpose: a scan flags absent files, it never
+    deletes them, because the usual reason a file is absent is an unplugged
+    drive. Removing the records is the user's call, so it needs this command
+    and an explicit --yes.
+    """
+    with CrateApp.open(args.data_dir) as app:
+        missing = app.samples.count_samples(status=SampleStatus.MISSING)
+        if not missing:
+            print("Nothing to prune: no samples are marked missing.")
+            return 0
+        if not args.yes:
+            print(f"{missing:,} sample(s) are marked missing.")
+            print("Re-run with --yes to delete their records. Files on disk are untouched.")
+            return 0
+        removed = app.samples.delete_missing()
+        print(f"Removed {removed:,} record(s). No files were deleted.")
+    return 0
+
+
+def cmd_ui(args: argparse.Namespace) -> int:
+    """Open the desktop browser."""
+    try:
+        from crate.ui import run
+    except ImportError:
+        print("The desktop UI needs PySide6. Install it with:", file=sys.stderr)
+        print('    pip install "crate[ui]"', file=sys.stderr)
+        return 1
+
+    with CrateApp.open(args.data_dir) as app:
+        return run(app)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="crate",
@@ -161,6 +197,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     roots = subparsers.add_parser("roots", help="List indexed directories.")
     roots.set_defaults(func=cmd_roots)
+
+    prune = subparsers.add_parser("prune", help="Delete records for files that no longer exist.")
+    prune.add_argument("--yes", action="store_true", help="Actually delete (default: report).")
+    prune.set_defaults(func=cmd_prune)
+
+    ui = subparsers.add_parser("ui", help="Open the desktop sample browser.")
+    ui.set_defaults(func=cmd_ui)
 
     return parser
 

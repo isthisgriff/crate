@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sqlite3
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -11,6 +12,9 @@ from crate.config import Settings
 from crate.library.scanner import LibraryScanner
 from crate.persistence.database import open_database
 from crate.persistence.sample_repository import SampleRepository
+
+# Qt tests run without a display. Set before PySide6 is imported anywhere.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 class FakeClock:

@@ -3,6 +3,8 @@
 from crate.domain.sample import (
     LibraryRoot,
     Sample,
+    SampleQuery,
+    SampleSort,
     SampleStatus,
     ScanErrorRecord,
     ScanOutcome,
@@ -14,6 +16,8 @@ from crate.domain.sample import (
 __all__ = [
     "LibraryRoot",
     "Sample",
+    "SampleQuery",
+    "SampleSort",
     "SampleStatus",
     "ScanErrorRecord",
     "ScanOutcome",

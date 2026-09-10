@@ -8,8 +8,8 @@ tool is better to use than it was before.
 | --- | --- | --- |
 | 0 | Project foundation | Done |
 | 1 | Sample library scanner | Done |
-| 2 | Sample browser and playback | Next |
-| 3 | Audio analysis | |
+| 2 | Sample browser and playback | Done |
+| 3 | Audio analysis | Next |
 | 4 | Categorization and tagging | |
 | 5 | Feature-based similarity (baseline) | |
 | 6 | Neural audio embeddings | |
@@ -47,29 +47,37 @@ reporting, per-file error capture, incremental rescans.
 Not in Phase 1: move detection (see decision D5), content hashing (D2),
 duration or any other property requiring the file to be opened.
 
-## Phase 2 — Sample browser and playback (next)
+## Phase 2 — Sample browser and playback ✅
 
-The goal is a genuine replacement for Explorer when hunting for a sound. No AI.
+`crate ui` opens a dark, keyboard-driven browser over the existing inventory.
 
-Scope:
+**Exit criteria:**
 
-- Desktop window (PySide6), sample list backed by the existing inventory
-- Filename search, filter by format, sort by name / date / size
-- Instant preview on click; play, pause, stop, seek
-- Waveform display
-- Favourites
-- Scanning from the UI, on a worker thread, with progress and cancel
+- [x] Browse the indexed library, paged (200 rows at a time, not 35,000)
+- [x] Search filenames *and folder names*; filter by format; favourites-only
+- [x] Sort by name / folder / size / date, in SQL
+- [x] Instant preview on select — median 11.5 ms decode, stream held open
+- [x] Play, pause, stop, seek; click or drag the waveform to scrub
+- [x] Waveform display, recomputed at the window's width
+- [x] Favourites, persisted, surviving rescans and folder renames
+- [x] Scan from the UI on a worker thread, with progress and cancel
+- [x] Move detection, so reorganising a pack does not discard favourites
+- [x] Drag a row straight into a DAW as a file
+- [x] Tests for the model, the audio engine and the window (headless)
+- [x] **Used against the real library** — 35,089 samples
 
-Architectural work this phase forces:
+Also this phase, because the real library demanded it: macOS AppleDouble
+sidecars are skipped (756 files, 2.1% of the library — D14) and `crate prune`
+clears records for files that are genuinely gone.
 
-- A view-model boundary so Qt types never leak into `crate.library`
-- Paginated queries — the list must not load 100k rows to show 40
-- Move detection (D5) before favourites make row identity valuable
+Drag-out was pulled forward from "future features" deliberately. Without it
+the workflow ends at "I found the sample" and you still go hunting in
+Explorer, which is the thing Crate exists to replace. It cost one method.
 
-**Exit criterion:** opening Crate instead of Explorer when looking for a sample,
-and not regretting it.
+**Exit criterion:** open Crate instead of Explorer when looking for a sample,
+and do not regret it.
 
-## Phase 3 — Audio analysis
+## Phase 3 — Audio analysis (next)
 
 Duration, sample rate, channels, peak, RMS, loudness; spectral features; BPM
 and key where they are meaningful, with explicit confidence and an honest
@@ -78,6 +86,16 @@ and key where they are meaningful, with explicit confidence and an honest
 Forces the first real infrastructure: a job queue
 (`pending → processing → completed → failed`), resumable across restarts, and
 content hashing so analysis is not repeated for unchanged bytes.
+
+Groundwork already in place from Phase 2:
+
+- `crate.audio.decode` is the decode path analysis will use — one file, one
+  open, whatever the reason.
+- `samples.content_hash` exists and is cleared whenever bytes change.
+- The scan-run/scan-error tables are the shape the job queue wants.
+
+Worth doing first: duration is the single most useful missing column in the
+browser, and it comes free with the decode.
 
 **Exit criterion:** "show me samples around 140 BPM" answered from extracted
 audio data.

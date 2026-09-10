@@ -87,7 +87,27 @@ CREATE TABLE scan_errors (
 CREATE INDEX idx_scan_errors_run ON scan_errors(scan_run_id);
 """
 
-MIGRATIONS: tuple[Migration, ...] = (Migration(1, "initial_inventory", _MIGRATION_0001),)
+_MIGRATION_0002 = """
+-- User organization. Kept on `samples` rather than in a side table because it
+-- is per-file, tiny, and needs to be sortable and filterable in the same query
+-- that drives the browser list. Scans never write these columns.
+ALTER TABLE samples ADD COLUMN favorite INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE samples ADD COLUMN favorited_at TEXT;
+
+-- Partial index: the browser filters on favorite = 1, and in a real library
+-- that is a few hundred rows out of tens of thousands.
+CREATE INDEX idx_samples_favorite ON samples(favorite) WHERE favorite = 1;
+
+-- Sort keys for the browser. Without these, ordering 35k rows by size or
+-- recency is a full scan on every keystroke.
+CREATE INDEX idx_samples_size  ON samples(size_bytes);
+CREATE INDEX idx_samples_mtime ON samples(mtime_ns);
+"""
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(1, "initial_inventory", _MIGRATION_0001),
+    Migration(2, "user_organization", _MIGRATION_0002),
+)
 
 SCHEMA_VERSION = MIGRATIONS[-1].version
 

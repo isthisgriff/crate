@@ -35,6 +35,7 @@ DEFAULT_IGNORED_DIR_NAMES: frozenset[str] = frozenset(
         ".hg",
         "__pycache__",
         "node_modules",
+        "__MACOSX",
         ".Trash",
         "$RECYCLE.BIN",
         "System Volume Information",

@@ -133,9 +133,7 @@ def test_update_clears_content_hash(repository: SampleRepository) -> None:
     )
     sample = repository.get_sample_by_path(KICK)
     assert sample is not None
-    repository._conn.execute(  # noqa: SLF001 - direct fixture setup
-        "UPDATE samples SET content_hash = 'abc' WHERE id = ?", (sample.id,)
-    )
+    repository._conn.execute("UPDATE samples SET content_hash = 'abc' WHERE id = ?", (sample.id,))
 
     repository.update_samples([(20, 2, stamp, stamp, sample.id)])
     reloaded = repository.get_sample_by_path(KICK)
@@ -178,8 +176,8 @@ def test_deleting_a_root_cascades(repository: SampleRepository) -> None:
     repository.insert_samples(
         [(root.id, _key(KICK), "kick.wav", ".wav", 10, 1, stamp, stamp, stamp)]
     )
-    with transaction(repository._conn):  # noqa: SLF001 - exercising the FK constraint
-        repository._conn.execute("DELETE FROM roots WHERE id = ?", (root.id,))  # noqa: SLF001
+    with transaction(repository._conn):
+        repository._conn.execute("DELETE FROM roots WHERE id = ?", (root.id,))
     assert repository.count_samples() == 0
 
 

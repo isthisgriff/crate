@@ -55,10 +55,48 @@ class Sample:
     last_seen_at: datetime
     updated_at: datetime
     content_hash: str | None = None
+    favorite: bool = False
+    favorited_at: datetime | None = None
 
     @property
     def stem(self) -> str:
         return Path(self.filename).stem
+
+
+class SampleSort(StrEnum):
+    """Sort keys the browser offers. Each is backed by an index."""
+
+    FILENAME = "filename"
+    PATH = "path"
+    SIZE = "size_bytes"
+    MODIFIED = "mtime_ns"
+    ADDED = "first_seen_at"
+
+
+@dataclass(frozen=True, slots=True)
+class SampleQuery:
+    """A browser query: what to show, in what order.
+
+    A value object rather than a pile of keyword arguments so the UI can hold
+    one, compare two for equality (has the query actually changed?) and hand it
+    to the repository unmodified.
+    """
+
+    text: str = ""
+    """Space-separated terms. Every term must appear in the path or filename."""
+
+    extensions: frozenset[str] = frozenset()
+    """Empty means all formats."""
+
+    favorites_only: bool = False
+    include_missing: bool = False
+    root_id: int | None = None
+    sort: SampleSort = SampleSort.FILENAME
+    descending: bool = False
+
+    @property
+    def terms(self) -> tuple[str, ...]:
+        return tuple(term for term in self.text.lower().split() if term)
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +159,7 @@ class ScanReport:
     unchanged: int
     marked_missing: int
     errors: int
+    moved: int = 0
     cancelled: bool = False
 
     @property

@@ -7,6 +7,8 @@ must be cheap and must not churn the database.
 from __future__ import annotations
 
 import os
+import shutil
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -353,3 +355,106 @@ def test_unreadable_directory_safety_holds_on_every_platform(
     snare = repository.get_sample_by_path(locked / "snare.wav")
     assert snare is not None
     assert snare.status is SampleStatus.PRESENT
+
+
+def test_renamed_folder_is_detected_as_a_move(
+    scanner: LibraryScanner, repository: SampleRepository, tmp_path: Path
+) -> None:
+    """Reorganising must not throw away row identity (and with it favourites)."""
+    root = tmp_path / "lib"
+    (root / "Pack A").mkdir(parents=True)
+    (root / "Pack A" / "kick.wav").write_bytes(b"kick")
+    (root / "Pack A" / "snare.wav").write_bytes(b"snare")
+
+    scanner.scan(root)
+    before = {sample.filename: sample.id for sample in repository.iter_samples()}
+    favourite_id = before["kick.wav"]
+    repository.set_favorite(favourite_id, True, datetime(2026, 1, 1, tzinfo=UTC))
+
+    (root / "Pack A").rename(root / "Pack A - Drums")
+    report = scanner.scan(root)
+
+    assert report.moved == 2
+    assert report.added == 0
+    assert report.marked_missing == 0
+    assert repository.count_samples() == 2
+
+    moved = repository.get_sample_by_path(root / "Pack A - Drums" / "kick.wav")
+    assert moved is not None
+    assert moved.id == favourite_id
+    assert moved.favorite is True
+    assert moved.status is SampleStatus.PRESENT
+
+
+def test_move_requires_name_size_and_mtime_to_agree(
+    scanner: LibraryScanner, repository: SampleRepository, tmp_path: Path
+) -> None:
+    root = tmp_path / "lib"
+    (root / "a").mkdir(parents=True)
+    (root / "a" / "kick.wav").write_bytes(b"kick")
+
+    scanner.scan(root)
+
+    (root / "b").mkdir()
+    (root / "b" / "kick.wav").write_bytes(b"a different kick entirely")
+    (root / "a" / "kick.wav").unlink()
+
+    report = scanner.scan(root)
+
+    # Same name, different bytes: a new file plus a deletion, not a move.
+    assert report.moved == 0
+    assert report.added == 1
+    assert report.marked_missing == 1
+
+
+def test_copying_a_file_is_not_a_move(
+    scanner: LibraryScanner, repository: SampleRepository, tmp_path: Path
+) -> None:
+    root = tmp_path / "lib"
+    (root / "a").mkdir(parents=True)
+    source = root / "a" / "kick.wav"
+    source.write_bytes(b"kick")
+
+    scanner.scan(root)
+
+    (root / "b").mkdir()
+    shutil.copy2(source, root / "b" / "kick.wav")
+    report = scanner.scan(root)
+
+    # The original is still there, so nothing went missing and nothing moved.
+    assert report.moved == 0
+    assert report.added == 1
+    assert report.marked_missing == 0
+    assert repository.count_samples() == 2
+
+
+def test_macos_sidecar_files_are_skipped(
+    scanner: LibraryScanner, repository: SampleRepository, tmp_path: Path
+) -> None:
+    """Unzipping a Mac-authored pack on Windows litters these everywhere.
+
+    They carry a .wav extension, are ~200 bytes, and are not audio.
+    """
+    root = tmp_path / "pack"
+    (root / "__MACOSX" / "pack").mkdir(parents=True)
+    (root / "Kick.wav").write_bytes(b"real audio")
+    (root / "._Kick.wav").write_bytes(b"\x00\x05\x16\x07resource fork")
+    (root / "__MACOSX" / "pack" / "._Snare.wav").write_bytes(b"resource fork")
+
+    report = scanner.scan(root)
+
+    assert report.files_seen == 1
+    assert repository.count_samples() == 1
+    sample = repository.iter_samples()[0]
+    assert sample.filename == "Kick.wav"
+
+
+def test_real_files_starting_with_a_dot_are_not_confused(
+    scanner: LibraryScanner, repository: SampleRepository, tmp_path: Path
+) -> None:
+    root = tmp_path / "pack"
+    root.mkdir()
+    (root / ".hidden_kick.wav").write_bytes(b"audio")
+    scanner.scan(root)
+    # Only the `._` sidecar prefix is junk; a plain dotfile is a real file.
+    assert repository.count_samples() == 1

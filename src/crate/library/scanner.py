@@ -26,10 +26,11 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections import defaultdict, deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 
 from crate.config import Settings
 from crate.domain import (
@@ -191,8 +192,12 @@ class LibraryScanner:
         flush()
 
         marked_missing = 0
+        moved = 0
         if not cancelled:
             missing_ids = self._missing_ids(known, seen_ids, unreadable_dirs)
+            if missing_ids:
+                moved, missing_ids = self._reconcile_moves(root.id, started_at, known, missing_ids)
+                counters["added"] -= moved
             marked_missing = self._repo.mark_missing(missing_ids, self._clock())
 
         finished_at = self._clock()
@@ -221,6 +226,7 @@ class LibraryScanner:
             updated=counters["updated"],
             unchanged=counters["unchanged"],
             marked_missing=marked_missing,
+            moved=moved,
             errors=counters["errors"],
             cancelled=cancelled,
         )
@@ -279,6 +285,57 @@ class LibraryScanner:
         else:
             batch.touches.append(existing.id)
             counters["unchanged"] += 1
+
+    def _reconcile_moves(
+        self,
+        root_id: int,
+        started_at: datetime,
+        known: dict[str, IndexedFile],
+        missing_ids: list[int],
+    ) -> tuple[int, list[int]]:
+        """Recognise renamed/relocated files instead of deleting and re-adding.
+
+        A file that disappeared from one path and appeared at another with the
+        same size, modification time and name is the same file. Re-pointing the
+        original row keeps its id -- and with it favourites, and in later
+        phases its analysis and embeddings. Without this, reorganising a pack
+        folder silently throws that work away.
+
+        The match runs after the walk because until it ends we cannot know
+        whether the original path is really gone or merely not visited yet.
+
+        Deliberately conservative: matching requires all three of size, mtime
+        and filename, and each candidate is consumed once. A library with many
+        identical copies pairs them arbitrarily, which is harmless -- the rows
+        are interchangeable by construction.
+        """
+        added_rows = self._repo.rows_added_since(root_id, started_at)
+        if not added_rows:
+            return 0, missing_ids
+
+        by_id = {record.id: path for path, record in known.items()}
+        candidates: dict[tuple[int, int, str], deque[int]] = defaultdict(deque)
+        for sample_id in missing_ids:
+            old_path = by_id.get(sample_id)
+            if old_path is None:
+                continue
+            record = known[old_path]
+            key = (record.size_bytes, record.mtime_ns, PurePath(old_path).name.lower())
+            candidates[key].append(sample_id)
+
+        moves: list[tuple[int, int]] = []
+        matched: set[int] = set()
+        for new_id, new_path, size_bytes, mtime_ns in added_rows:
+            key = (size_bytes, mtime_ns, PurePath(new_path).name.lower())
+            queue = candidates.get(key)
+            if not queue:
+                continue
+            old_id = queue.popleft()
+            moves.append((old_id, new_id))
+            matched.add(old_id)
+
+        self._repo.apply_moves(moves, self._clock())
+        return len(moves), [sample_id for sample_id in missing_ids if sample_id not in matched]
 
     @staticmethod
     def _missing_ids(
